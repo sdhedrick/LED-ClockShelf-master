@@ -5,6 +5,7 @@
  */
 
 #include "TimeManager.h"
+#include <WebSerial.h>
 
 TimeManager* TimeManager::TimeManagerSingelton = nullptr;
 
@@ -101,6 +102,7 @@ bool TimeManager::synchronize()
 	if(!getLocalTime(&timeinfo))
 	{
 		Serial.println("[TimeManager::synchronize]: TimeManager failed to get time from NTP server");
+		WebSerial.println("[TimeManager::synchronize]: TimeManager failed to get time from NTP server");
 		return false;
 	}
 	currentTime.hours 	= timeinfo.tm_hour;
@@ -114,6 +116,15 @@ bool TimeManager::synchronize()
 	{
 		currentWeekday 	= timeinfo.tm_wday - 1;
 	}
+
+	Serial.print("[TimeManager::synchronize]: Synchronize() ran.  Time received: Hours = "); 
+	Serial.print(currentTime.hours);
+	Serial.print(", Minutes = ");
+	Serial.println(currentTime.minutes);
+	WebSerial.print("[TimeManager::synchronize]: Synchronize() ran.  Time received: Hours = "); 
+	WebSerial.print(currentTime.hours);
+	WebSerial.print(", Minutes = ");
+	WebSerial.println(currentTime.minutes);
 	return true;
 }
 
@@ -253,6 +264,10 @@ void IRAM_ATTR onTimer()
 	TimeManager* timeM = TimeManager::getInstance();
 	// Time code, use this for normal operation
 	#if TIME_MANAGER_DEMO_MODE == false
+		// shedrick: This is causing the esp32 to restart.  I don't know why but the NTP code will sync automatically 
+		// every hour as defined by:  CONFIG_LWIP_SNTP_UPDATE_DELAY.
+		timeM->advanceByOneSecondOffline();
+		/*
 		if(timeM->offlineTimeCounter++ >= TIME_SYNC_INTERVAL && WiFi.status() == WL_CONNECTED)
 		{
 			if(timeM->synchronize() == true)
@@ -268,7 +283,9 @@ void IRAM_ATTR onTimer()
 		{
 			timeM->advanceByOneSecondOffline();
 		}
+		*/
 		//handle timer
+		/*
 		if(timeM->TimerModeActive == true)
 		{
 			timeM->TimerCountDOwnByOneSecond();
@@ -286,6 +303,8 @@ void IRAM_ATTR onTimer()
 				timeM->TimerModeActive = false;
 			}
 		}
+		*/
+		/*
 		// handle the alarm
 		if(((1 << timeM->currentWeekday) & timeM->AlarmActiveDays) != 0)
 		{
@@ -307,6 +326,7 @@ void IRAM_ATTR onTimer()
 				timeM->AlarmCleared = false;
 			}
 		}
+		*/
 	#else
 		//DEMO CODE: Useful for testing animations
 		timeM->currentTime.minutes++;

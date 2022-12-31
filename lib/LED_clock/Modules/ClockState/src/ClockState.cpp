@@ -1,5 +1,4 @@
 #include "ClockState.h"
-#include <WebSerial.h>
 
 ClockState* ClockState::instance = nullptr;
 
@@ -8,7 +7,10 @@ ClockState::ClockState()
 	MainState = CLOCK_MODE;
 	clockBrightness = DEFAULT_CLOCK_BRIGHTNESS;
 	alarmToggleCount = 0;
-	nightModeBrightness = DEFAULT_NIGHT_MODE_BRIGHTNESS;
+	nightModeBrightness = DEFAULT_CLOCK_BRIGHTNESS;
+	#if USE_NIGHT_MODE == true
+		nightModeBrightness = DEFAULT_NIGHT_MODE_BRIGHTNESS;
+	#endif
 	numDots = NUM_SEPARATION_DOTS;
 
 	NightModeStartTime = TimeManager::TimeInfo {DEFAULT_NIGHT_MODE_START_HOUR, DEFAULT_NIGHT_MODE_START_MINUTE, 0};
@@ -79,9 +81,6 @@ void ClockState::handleStates()
 				}
 			#endif
 			ShelfDisplays->displayTime(currentTime.hours, currentTime.minutes);
-			//WebSerial.print("Setting Time: ");
-			//WebSerial.print(currentTime.hours); WebSerial.print(":");
-			//WebSerial.println(currentTime.minutes);
 			#if DISPLAY_FOR_SEPARATION_DOT > -1
 				if(numDots > 0)
 				{

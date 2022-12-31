@@ -206,16 +206,13 @@ void DisplayManager::displayRaw(uint8_t Hour, uint8_t Minute)
 
 void DisplayManager::displayTime(uint8_t hours, uint8_t minutes)
 {
-	#if DISPLAY_0_AT_MIDNIGHT == true
-	if(hours == 24)
-	{
-		hours = 0;
-	}
-	#endif
 	#if USE_24_HOUR_FORMAT == false
 		if(hours >= 13)
 		{
 			hours -= 12;
+		}
+		if(hours == 0) {
+			hours = 12;
 		}
 	#endif
 	displayRaw(hours, minutes);

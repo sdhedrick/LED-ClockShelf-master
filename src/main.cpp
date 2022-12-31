@@ -11,8 +11,12 @@
 #include <ESPmDNS.h> // For mDNS
 #include <AsyncTCP.h> // For Async webserver
 #include <ESPAsyncWebServer.h> // For Async webserver
-#include <EEPROM.h> // For reading/writing to EEPROM on the board (save values during power cycle)
 #include <WebSerial.h> // for sending debug to web.
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+#include "FS.h"
+#include <LittleFS.h> // gonna use for file storage and reading/writing settings instead of eeprom.  Will use JSON for settings.
+#include "ArduinoJson.h" // reading/writing json
 
 #if ENABLE_ALEXA == true
 	#include "fauxmoESP.h"
@@ -37,46 +41,28 @@ ClockState* states = ClockState::getInstance();
 #endif
 
 // Declarations of functions that are below
-void TimerTick();
-void TimerDone();
-void AlarmTriggered();
+//void TimerTick();
+//void TimerDone();
+//void AlarmTriggered();
 void startupAnimation();
-void initEEPROMOnStartup();
-String webOnOffButtonState(int);
+String webOnOffButtonState(String);
 String webProcessor(const String&);
 void toggleDownlights(int, int);
 void toggleClocklights(int, int);
 void toggleSchlock(int, int);
 void runTestModeOnStartup();
 CRGB clamp_rgb(CRGB, int);
-void outputEEPROMValues();
 void outputESPMemory();
+void initializeAndReadConfig();
+void outputConfigFile();
+void readConfigJson();
+void wipeAndReinitialize();
+void updateSetting(String, String);
 
 // Web Server Variables
 // On/Off button states
 const char* PARAM_INPUT_1 = "button";
 const char* PARAM_INPUT_2 = "state";
-
-// Tracking variables for web/eeprom/power-cycle
-/*
-	EEPROM Address usage
-	0: 			downlighter On/Off state
-	1:			clock On/Off state
-	2:			Test Mode.  0 or 255 for normal and 1 for Test Mode.
-	3:			saved global default brightness level
-*/
-#define EEPROM_SIZE 9
-
-// EEPROM Addresses
-const int EE_downlighterOnOffState = 0;
-const int EE_clockOnOffState = 1;
-const int EE_testMode = 2;
-const int EE_defaultGlobalBrightnessLevel = 3;  // 0 (off) thru 253
-const int EE_defaultHourColor = 4; // index into an array of CRGB.  Black 0, White 255.
-const int EE_defaultMinColor = 5;
-const int EE_defaultDLColor = 6;
-const int EE_currentClockBrightnessLevel = 7;
-const int EE_currentDLBrightnessLevel = 8;
 
 // Default Web values
 bool downlightersOnOffState = DEF_DOWNLIGHTERSONOFFSTATE;
@@ -86,8 +72,12 @@ int defaultGlobalBrightnessLevel = DEFAULT_CLOCK_BRIGHTNESS;
 int currentClockBrightnessLevel = DEFAULT_CLOCK_BRIGHTNESS;
 int currentDLBrightnessLevel = DEFAULT_CLOCK_BRIGHTNESS;
 CRGB defaultHourColor = HOUR_COLOR;
+int defaultHourColorIndex = 0;
 CRGB defaultMinColor = MINUTE_COLOR;
+int defaultMinColorIndex = 0;
 CRGB defaultDLColor = INTERNAL_COLOR;
+int defaultDLColorIndex = 0;
+const char* ESPHostName = ESP_HOST_NAME;
 
 
 struct crgbcolor {
@@ -311,6 +301,11 @@ var xhr = new XMLHttpRequest();
 xhr.open("GET", "/update?button=RESTART&state=1", true);
 xhr.send();
 }
+function reinitSettings() {
+var xhr = new XMLHttpRequest();
+xhr.open("GET", "/update?button=REINITSETTINGS&state=1", true);
+xhr.send();
+}
 function updateSliderG(element) {
   var sValue = document.getElementById("gSlider").value;
   document.getElementById("gSliderText").innerHTML = sValue;
@@ -337,16 +332,18 @@ function updateSliderDL(element) {
 </html>
 )rawliteral";
 
+// For saving settings into littlefs
+const char *settingfile = "/clockconfig.json"; // main clock config
+//DynamicJsonDocument doc(1024); // doc will be our in memory json
+int jsoncapacity = 1024;
 
 // +++++++++++++++++++++++ SETUP +++++++++++++++++++++++++++++
 void setup()
 {
 	Serial.begin(115200);
+	delay(5000);
+	WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);  // disable brownout detector
 
-	// Read any EEPROM saved values.  NOTE:  255 is the value of an UNSET variable as of yet.
-	EEPROM.begin(EEPROM_SIZE);
-	initEEPROMOnStartup();
-	
 	ShelfDisplays->InitSegments(0, NUM_LEDS_PER_SEGMENT, WIFI_CONNECTING_COLOR, 50);
 
 	ShelfDisplays->setHourSegmentColors(WIFI_CONNECTING_COLOR);
@@ -417,8 +414,13 @@ void setup()
 			if (inputMessage1 == "RESTART") {
 				// Restarting controller
 				ESP.restart();
+				//ESP.reset();
 			}
-			if (inputMessage1 == String(EE_downlighterOnOffState)) {
+			if (inputMessage1 == "REINITSETTINGS") {
+				// Run the code to re-initialize the JSON settings file
+				wipeAndReinitialize();
+			}
+			if (inputMessage1 == "DLOnOffState") {
 				if (inputMessage2 == "0") {
 					// Set downlights to black.  (turn off)
 					toggleDownlights(0, 0);
@@ -427,7 +429,7 @@ void setup()
 					toggleDownlights(1, currentDLBrightnessLevel);
 				}
 			}
-			if (inputMessage1 == String(EE_clockOnOffState)) {
+			if (inputMessage1 == "ClockOnOffState") {
 				if (inputMessage2 == "0") {
 					// Set clock to black.  (turn off)
 					toggleClocklights(0, 0);
@@ -435,49 +437,46 @@ void setup()
 					toggleClocklights(1, currentClockBrightnessLevel);
 				}
 			}
-			if (inputMessage1 == String(EE_testMode)) {
+			if (inputMessage1 == "TestMode") {
 				if (inputMessage2 == "0") {
 					// Turn off test mode.
 					ShelfDisplays->setHourSegmentColors(defaultHourColor);
 					ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
 					ShelfDisplays->setGlobalBrightness(defaultGlobalBrightnessLevel);
 					testMode = false;
-					EEPROM.write(EE_testMode,0);
-					EEPROM.commit();
+					updateSetting("TestMode", "Off");
 				} else {
 					// Turn on test mode.
 					testMode = true;
-					EEPROM.write(EE_testMode,1);
-					EEPROM.commit();
+					updateSetting("TestMode", "On");
 				}
 			}
-			if (inputMessage1 == String(EE_defaultHourColor)) {
+			if (inputMessage1 == "HCol") {
 				// Set default color
-				defaultHourColor = arr_crgbcolors[inputMessage2.toInt()].colorcrgb;
+				defaultHourColorIndex = inputMessage2.toInt();
+				defaultHourColor = arr_crgbcolors[defaultHourColorIndex].colorcrgb;
 				ShelfDisplays->setHourSegmentColors(defaultHourColor);
-				EEPROM.write(EE_defaultHourColor,inputMessage2.toInt());
-				EEPROM.commit();
+				updateSetting("HCol", inputMessage2);
 			}
-			if (inputMessage1 == String(EE_defaultMinColor)) {
+			if (inputMessage1 == "MCol") {
 				// Set default color
-				defaultMinColor = arr_crgbcolors[inputMessage2.toInt()].colorcrgb;
+				defaultMinColorIndex = inputMessage2.toInt();
+				defaultMinColor = arr_crgbcolors[defaultMinColorIndex].colorcrgb;
 				ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
-				EEPROM.write(EE_defaultMinColor,inputMessage2.toInt());
-				EEPROM.commit();
+				updateSetting("MCol", inputMessage2);
 			}
-			if (inputMessage1 == String(EE_defaultDLColor)) {
+			if (inputMessage1 == "DLCol") {
 				// Set default color
-				defaultDLColor = arr_crgbcolors[inputMessage2.toInt()].colorcrgb;
+				defaultDLColorIndex = inputMessage2.toInt();
+				defaultDLColor = arr_crgbcolors[defaultDLColorIndex].colorcrgb;
 				ShelfDisplays->setInternalLEDColor(defaultDLColor);
-				EEPROM.write(EE_defaultDLColor,inputMessage2.toInt());
-				EEPROM.commit();
+				updateSetting("DLCol", inputMessage2);
 			}
 			if (inputMessage1 == "gSlider") {
 				// Update Global Brightness
 				defaultGlobalBrightnessLevel = inputMessage2.toInt();
 				ShelfDisplays->setGlobalBrightness(defaultGlobalBrightnessLevel);
-				EEPROM.write(EE_defaultGlobalBrightnessLevel,inputMessage2.toInt());
-				EEPROM.commit();
+				updateSetting("GlobalBrightness", inputMessage2);
 			}
 			if (inputMessage1 == "cSlider") {
 				// Update Clock Brightness
@@ -514,7 +513,7 @@ void setup()
 
 	// Start Web server
 	server.begin();
-	delay(10000);
+	delay(5000);
 
 	Serial.println("Fetching time from NTP server...");
 	WebSerial.println("Fetching time from NTP server...");
@@ -525,12 +524,13 @@ void setup()
 		WebSerial.print(TIME_SYNC_INTERVAL);
 		WebSerial.println(" seconds");
 	}
-	timeM->setTimerTickCallback(TimerTick);
-	timeM->setTimerDoneCallback(TimerDone);
-	timeM->setAlarmCallback(AlarmTriggered);
+	// I have disabled alot of code revolving around the Timer and Alarm.  Disabling setting up these callback functions.
+	//timeM->setTimerTickCallback(TimerTick);
+	//timeM->setTimerDoneCallback(TimerDone);
+	//timeM->setAlarmCallback(AlarmTriggered);
 
-	// Output EEPROM Values
-	outputEEPROMValues();
+	// Initialize our Config File
+	initializeAndReadConfig();
 
 	bool ranTestModeOnStartup = false;
 	if (TEST_MODE_ON_STARTUP == true && !testMode && !ranTestModeOnStartup) {
@@ -559,12 +559,17 @@ void setup()
 // +++++++++++++++++++++++ MAIN LOOP +++++++++++++++++++++++++++++
 int lasttest = millis();
 int lastmem = millis();
+int lastfstest = millis();
 void loop()
 {
 	/*if ((millis()-lastmem)>=10000) {
 		outputESPMemory();
 		lastmem = millis();
 	}*/
+	//if ((millis()-lastfstest)>=10000) {
+		//readConfigFile();
+		//lastfstest = millis();
+	//}
 	#if ENABLE_OTA_UPLOAD == true
 		ArduinoOTA.handle();
 	#endif
@@ -591,6 +596,290 @@ void loop()
 	}
 
     ShelfDisplays->handle();
+}
+
+// Initialize our settings file.
+// This will check if the file exists.  If not, we'll create it and save our default settings into it (from configuration.h)
+// If file does exist, we have to check if the json is there.  If not, we will wipe the contents and re-write from configuration.h.
+// If the file exists and the json is readable, then we read the json and set our default values.
+void initializeAndReadConfig() {
+	bool bWipeAndReinitialize = false;
+	LittleFS.begin();
+
+	if (!LittleFS.exists(settingfile)) {
+		// File does not yet exist, so we will initialize with default settings from the configuration.h file
+		Serial.println("Setup:  Setting File does not yet exist, creating file...");
+		WebSerial.println("Setup:  Setting File does not yet exist, creating file...");
+		bWipeAndReinitialize = true;
+
+		File configfile = LittleFS.open(settingfile, "w+");
+
+		if (!configfile) {
+			Serial.print("Could not open file to write: "); Serial.println(settingfile);
+			WebSerial.print("Could not open file to write: "); WebSerial.println(settingfile);
+		} else {
+			// File does not exist.  Wipe and write initial data to file.  
+			configfile.println("This is my first time writing to littlefs...");
+			configfile.close();
+		}
+
+	} else {
+		// File exists
+		Serial.println("Setup:  Setting File exists!  Attempting to read contents and values...");
+		WebSerial.println("Setup:  Setting File exists!  Attempting to read contents and values...");
+		// Try to read JSON.  If we cannot read our JSON data then we will delete contents and re-write the json data based on configuration.h values.
+		// File does not exist.  Wipe and write initial data to file.  
+		File configfile = LittleFS.open(settingfile, "r");
+		//auto filecontents = configfile.readString();
+		DynamicJsonDocument doc(jsoncapacity);
+		DeserializationError error = deserializeJson(doc, configfile);
+		configfile.close();
+		if (error) {
+			Serial.print("deserializeJson() failed: "); Serial.println(error.f_str());
+			WebSerial.print("deserializeJson() failed: "); WebSerial.println(error.f_str());
+			bWipeAndReinitialize = true;
+		} else {
+			Serial.println("deserializeJson() success!  Reading Values.");
+			WebSerial.println("deserializeJson() success!  Reading Values.");
+			// Try to read our ESP Host Name, if that is not successful, then we will wipe and reinitialize
+			bool hasKey = doc.containsKey("ESPHostName");
+			if (!hasKey) {
+				bWipeAndReinitialize = true;
+			}
+		}
+	}
+
+	LittleFS.end();
+
+	if (bWipeAndReinitialize) {
+		// Either the config file does not exist or there was a problem reading our valid json.  We will reinitialize the file and then
+		// re-read the json.
+		wipeAndReinitialize();
+	} else {
+		// File and JSON seem ok, we will read in the entire json from the file
+		readConfigJson();
+	}
+}
+
+/*
+	wipeAndReinitialize():  This function should be called only once (routinely) when the file hasn't been created.
+	This sets the initial values in our settingfile in LittleFS based on the parameters in Configuration.h.
+	Once this file is created, the values in this file will be used on startup of the device instead of the 
+	values in Configuration.h.  
+
+	There will be a button added to the webpage that allows us to "reset" all of these values manually to those in Configuration.h.
+*/
+void wipeAndReinitialize() {
+	LittleFS.begin();
+
+	Serial.println("wipeAndReinitialize():  ");
+	WebSerial.println("wipeAndReinitialize():  ");
+
+	// We will set all of our values from the config.h
+	DynamicJsonDocument doc(jsoncapacity);
+	doc["ESPHostName"] = ESP_HOST_NAME;
+	doc["OTAHostName"] = OTA_UPDATE_HOST_NAME;
+	doc["WifiSSID"] = WIFI_SSID;
+	doc["WifiPW"] = WIFI_PW;
+	doc["DLOn"] = DEF_DOWNLIGHTERSONOFFSTATE;
+	doc["ClockOn"] = DEF_CLOCKONOFFSTATE;
+	doc["HCol"] = defaultHourColorIndex;
+	doc["MCol"] = defaultMinColorIndex;
+	doc["DLCol"] = defaultDLColorIndex;
+	doc["TZ"] = TIMEZONE_INFO;
+	doc["GlobalBrightness"] = DEFAULT_CLOCK_BRIGHTNESS;
+	doc["ClockBrightness"] = DEFAULT_CLOCK_BRIGHTNESS;
+	doc["DLBrightness"] = DEFAULT_CLOCK_BRIGHTNESS;
+	doc["TestMode"] = TEST_MODE;
+	doc["TestModeOnStartup"] = TEST_MODE_ON_STARTUP;
+	doc["MaxMilliAmps"] = MAX_MILLIAMPS;
+	doc["AlexaOn"] = ENABLE_ALEXA;
+	doc["Alexa1Name"] = ALEXA_LAMP_1;
+	doc["Alexa2Name"] = ALEXA_LAMP_2;
+	doc["Alexa3Name"] = ALEXA_LAMP_3;
+
+
+	File configfile = LittleFS.open(settingfile, "w");
+	if (!configfile) {
+		Serial.println("wipeAndReinitialize:  Couldn't open file for write...");
+		WebSerial.println("wipeAndReinitialize:  Couldn't open file for write...");
+	} else {
+		serializeJson(doc, configfile);
+		configfile.println();
+	}
+	configfile.close();
+	LittleFS.end();
+
+	readConfigJson();
+}
+
+// readConfigJson():  This file will read all values from our setting file and apply them to our global variables
+// for LED colors/etc.  This will be done on startup of the device only. (or if wipe is called).
+void readConfigJson() {
+	LittleFS.begin();
+
+	DynamicJsonDocument doc(jsoncapacity);
+	File configfile = LittleFS.open(settingfile, "r");
+
+	if (!configfile) {
+		Serial.println("readConfigJson:  Couldn't open our setting file...");
+		WebSerial.println("readConfigJson:  Couldn't open our setting file...");
+		configfile.close();
+		LittleFS.end();
+		return;
+	} else {
+		DeserializationError error = deserializeJson(doc, configfile);
+		configfile.close();
+		if (error) {
+			Serial.print("readConfigJson:  Couldn't deserialize JSON:  "); Serial.println(error.f_str());
+			WebSerial.println("readConfigJson:  Couldn't deserialize JSON:  "); WebSerial.println(error.f_str());
+			LittleFS.end();
+			return;
+		}
+	}
+	// File is read and JSON deserialized.  Get values
+	// For now just output.
+	outputConfigFile();
+
+	String settingName;
+	String s = "";
+
+	settingName = "ESPHostName";
+	ESPHostName = doc[settingName].as<const char*>();
+	s+="Setting: ";s+=settingName;s+=": ";s+=doc[settingName].as<const char*>();
+
+	settingName = "DLOn";
+	downlightersOnOffState = doc[settingName].as<bool>();
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<bool>();
+
+	settingName = "ClockOn";
+	clockOnOffState = doc[settingName].as<bool>();
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<bool>();
+
+	settingName = "HCol";
+	defaultHourColorIndex = doc[settingName].as<int>();
+	defaultHourColor = arr_crgbcolors[defaultHourColorIndex].colorcrgb;
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<int>();
+
+	settingName = "MCol";
+	defaultMinColorIndex = doc[settingName].as<int>();
+	defaultMinColor = arr_crgbcolors[defaultMinColorIndex].colorcrgb;
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<int>();
+
+	settingName = "DLCol";
+	defaultDLColorIndex = doc[settingName].as<int>();
+	defaultDLColor = arr_crgbcolors[defaultDLColorIndex].colorcrgb;
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<int>();
+
+	settingName = "GlobalBrightness";
+	defaultGlobalBrightnessLevel = doc[settingName].as<int>();
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<int>();
+
+	settingName = "ClockBrightness";
+	currentClockBrightnessLevel = doc[settingName].as<int>();
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<int>();
+
+	settingName = "DLBrightness";
+	currentDLBrightnessLevel = doc[settingName].as<int>();
+	s+="\nSetting: ";s+=settingName;s+=": ";s+=doc[settingName].as<int>();
+
+	Serial.println(s);
+	WebSerial.println(s);
+
+	/*
+	settingName = "OTAHostName";
+	settingName = "WifiSSID";
+	settingName = "WifiPW";
+	settingName = "TZ";
+	settingName = "TestMode";
+	settingName = "MaxMilliAmps";
+	settingName = "AlexaOn";
+	settingName = "Alexa1Name";
+	settingName = "Alexa2Name";
+	settingName = "Alexa3Name";
+	*/
+	LittleFS.end();
+}
+
+// updateSetting():  This is passed a single value to update in our JSON setting file.
+// The only way I see how to do this is:
+// 1. Read/Deserialize
+// 2. Update the value in the JSON Doc
+// 3. Serialize/Write the entire JSON doc back to the file.
+// More efficient way to do it?  /shrug
+void updateSetting(String settingName, String settingValue) {
+	// Read and Deserialize
+	LittleFS.begin();
+
+	DynamicJsonDocument doc(jsoncapacity);
+	File configfile = LittleFS.open(settingfile, "r");
+
+	if (!configfile) {
+		Serial.println("updateSetting:  Couldn't open our setting file...");
+		WebSerial.println("updateSetting:  Couldn't open our setting file...");
+		configfile.close();
+		LittleFS.end();
+		return;
+	} else {
+		DeserializationError error = deserializeJson(doc, configfile);
+		configfile.close();
+		if (error) {
+			Serial.print("updateSetting:  Couldn't deserialize JSON:  "); Serial.println(error.f_str());
+			WebSerial.println("updateSetting:  Couldn't deserialize JSON:  "); WebSerial.println(error.f_str());
+			LittleFS.end();
+			return;
+		}
+	}
+
+	// Update the setting in the JSON Document
+	// On/Off (checkbox) settings (On/Off = true/false)
+	if (settingName == "DLOn" || settingName == "ClockOn" || settingName == "TestMode") {
+		bool bValue;
+		(settingValue == "On") ? bValue = true : bValue = false;
+		doc[settingName] = bValue;
+		Serial.print("updateSetting:  updating: "); Serial.print(settingName); Serial.print(", value: "); Serial.println(settingValue);
+		WebSerial.print("updateSetting:  updating: "); WebSerial.print(settingName); WebSerial.print(", value: "); WebSerial.println(settingValue);
+	}
+	// Brightness Sliders (int 0 to 255)
+	if (settingName == "GlobalBrightness" || settingName == "ClockBrightness" || settingName == "DLBrightness") {
+		int iValue = settingValue.toInt();
+		doc[settingName] = iValue;
+		Serial.print("updateSetting:  updating: "); Serial.print(settingName); Serial.print(", value: "); Serial.println(settingValue);
+		WebSerial.print("updateSetting:  updating: "); WebSerial.print(settingName); WebSerial.print(", value: "); WebSerial.println(settingValue);
+	}
+	// Color Values (int 0 to ?? and this is in the index inside our giant color array above)
+	if (settingName == "MCol" || settingName == "HCol" || settingName == "DLCol") {
+		int iValue = settingValue.toInt();
+		doc[settingName] = iValue;
+		Serial.print("updateSetting:  updating: "); Serial.print(settingName); Serial.print(", value: "); Serial.println(iValue);
+		WebSerial.print("updateSetting:  updating: "); WebSerial.print(settingName); WebSerial.print(", value: "); WebSerial.println(iValue);
+	}
+
+	// Write the JSON Document back to the Settings file
+	configfile = LittleFS.open(settingfile, "w");
+	if (!configfile) {
+		Serial.println("updateSetting:  Couldn't open file for write...");
+		WebSerial.println("updateSetting:  Couldn't open file for write...");
+	} else {
+		serializeJson(doc, configfile);
+		configfile.println();
+	}
+	configfile.close();
+
+	LittleFS.end();
+}
+
+// outputConfigFile():  This is just for output/testing purposes.
+void outputConfigFile() {
+	LittleFS.begin();
+	File file = LittleFS.open(settingfile, "r");
+	auto filecontents = file.readString();
+	file.close();
+	Serial.println("outputConfigFile - reading setting file contents:");
+	Serial.println(filecontents.c_str());
+	WebSerial.println("outputConfigFile - reading setting file contents:");
+	WebSerial.println(filecontents.c_str());
+	LittleFS.end();
 }
 
 void outputESPMemory(){
@@ -673,17 +962,15 @@ void runTestModeOnStartup() {
 }
 
 // Used by web
-String webOnOffButtonState(int button){
-	switch(button) {
-		case EE_downlighterOnOffState:
-			if(downlightersOnOffState){return "checked";} else {return "";}
-			break;
-		case EE_clockOnOffState:
-			if(clockOnOffState){return "checked";} else {return "";}
-			break;
-		case EE_testMode:
-			if(testMode){return "checked";} else {return "";}
-			break;
+String webOnOffButtonState(String button){
+	if (button == "DLOnOffState") {
+		if(downlightersOnOffState){return "checked";} else {return "";}
+	}
+	if (button == "ClockOnOffState") {
+		if(clockOnOffState){return "checked";} else {return "";}
+	}
+	if (button == "TestMode") {
+		if(testMode){return "checked";} else {return "";}
 	}
     return "";
 }
@@ -694,16 +981,17 @@ String webProcessor(const String& var){
     if(var == "BUTTONPLACEHOLDER"){
         String buttons = "";
         buttons += "<label class=\"button\"><input type=\"button\" onclick=\"restartController()\" id=\"RESTART\" value=\"Restart Controller\"></label>\n";
-        buttons += "<h4>Turn Off/On Downlighters</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"" + String(EE_downlighterOnOffState) + "\" " + webOnOffButtonState(EE_downlighterOnOffState) + "><span class=\"slider\"></span></label>\n";
-        buttons += "<h4>Turn Off/On Clock</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"" + String(EE_clockOnOffState) + "\" " + webOnOffButtonState(EE_clockOnOffState) + "><span class=\"slider\"></span></label>\n";
-        buttons += "<h4>Test Mode Off/On</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"" + String(EE_testMode) + "\" " + webOnOffButtonState(EE_testMode) + "><span class=\"slider\"></span></label>\n";
+        buttons += "<label class=\"button\"><input type=\"button\" onclick=\"reinitSettings()\" id=\"REINITSETTINGS\" value=\"Reinit Settings\"></label>\n";
+        buttons += "<h4>Turn Off/On Downlighters</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"DLOnOffState\" " + webOnOffButtonState("DLOnOffState") + "><span class=\"slider\"></span></label>\n";
+        buttons += "<h4>Turn Off/On Clock</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"ClockOnOffState\" " + webOnOffButtonState("ClockOnOffState") + "><span class=\"slider\"></span></label>\n";
+        buttons += "<h4>Test Mode Off/On</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"TestMode\" " + webOnOffButtonState("TestMode") + "><span class=\"slider\"></span></label>\n";
 		// Select for Hours Color:
-		String hourSelect = "<h4>Hour Digits Color</h4>\n<select name=\"hourColor\" id=\"" + String(EE_defaultHourColor) + "\" onchange=\"toggleColor(this)\">\n";
+		String hourSelect = "<h4>Hour Digits Color</h4>\n<select name=\"hourColor\" id=\"HCol\" onchange=\"toggleColor(this)\">\n";
 		for (int i = 0; i < NUM_COLORS; i++) {
 			String colorName = arr_crgbcolors[i].colornamecrgb;
 			String bgcolor = arr_crgbcolors[i].colorvaluenamehex;
-			// Compare the color in EEPROM with the value of this option and if they match, we mark "selected"
-			if (arr_crgbcolors[i].colorcrgb == arr_crgbcolors[EEPROM.read(EE_defaultHourColor)].colorcrgb) {
+			// Compare the current color with the value of this option and if they match, we mark "selected"
+			if (i == defaultHourColorIndex) {
 				hourSelect += "<option value=\"" + String(i) + "\" style=\"background-color: " + bgcolor + "\" selected>" + colorName + "</option>\n";
 			} else {
 				hourSelect += "<option value=\"" + String(i) + "\" style=\"background-color: " + bgcolor + "\">" + colorName + "</option>\n";
@@ -714,12 +1002,12 @@ String webProcessor(const String& var){
 		buttons += hourSelect;
 
 		// Select for Min Color:
-		String minSelect = "<h4>Minute Digits Color</h4>\n<select name=\"minColor\" id=\"" + String(EE_defaultMinColor) + "\" onchange=\"toggleColor(this)\">\n";
+		String minSelect = "<h4>Minute Digits Color</h4>\n<select name=\"minColor\" id=\"MCol\" onchange=\"toggleColor(this)\">\n";
 		for (int i = 0; i < NUM_COLORS; i++) {
 			String colorName = arr_crgbcolors[i].colornamecrgb;
 			String bgcolor = arr_crgbcolors[i].colorvaluenamehex;
-			// Compare the color in EEPROM with the value of this option and if they match, we mark "selected"
-			if (arr_crgbcolors[i].colorcrgb == arr_crgbcolors[EEPROM.read(EE_defaultMinColor)].colorcrgb) {
+			// Compare the current color with the value of this option and if they match, we mark "selected"
+			if (i == defaultMinColorIndex) {
 				minSelect += "<option value=\"" + String(i) + "\" style=\"background-color: " + bgcolor + "\" selected>" + colorName + "</option>\n";
 			} else {
 				minSelect += "<option value=\"" + String(i) + "\" style=\"background-color: " + bgcolor + "\">" + colorName + "</option>\n";
@@ -730,12 +1018,12 @@ String webProcessor(const String& var){
 		buttons += minSelect;
 
 		// Select for DL Color:
-		String dlSelect = "<h4>Downlights Color</h4>\n<select name=\"dlColor\" id=\"" + String(EE_defaultDLColor) + "\" onchange=\"toggleColor(this)\">\n";
+		String dlSelect = "<h4>Downlights Color</h4>\n<select name=\"dlColor\" id=\"DLCol\" onchange=\"toggleColor(this)\">\n";
 		for (int i = 0; i < NUM_COLORS; i++) {
 			String colorName = arr_crgbcolors[i].colornamecrgb;
 			String bgcolor = arr_crgbcolors[i].colorvaluenamehex;
-			// Compare the color in EEPROM with the value of this option and if they match, we mark "selected"
-			if (arr_crgbcolors[i].colorcrgb == arr_crgbcolors[EEPROM.read(EE_defaultDLColor)].colorcrgb) {
+			// Compare the current color with the value of this option and if they match, we mark "selected"
+			if (i == defaultDLColorIndex) {
 				dlSelect += "<option value=\"" + String(i) + "\" style=\"background-color: " + bgcolor + "\" selected>" + colorName + "</option>\n";
 			} else {
 				dlSelect += "<option value=\"" + String(i) + "\" style=\"background-color: " + bgcolor + "\">" + colorName + "</option>\n";
@@ -760,99 +1048,6 @@ String webProcessor(const String& var){
     return String();
 }
 
-void initEEPROMOnStartup() {
-	Serial.println("Reading EEPROM...");
-
-	// Is downlighter supposed to be on or off
-	int EE_value = EEPROM.read(EE_downlighterOnOffState);
-	Serial.print("EE_downlighterOnOffState: ");	Serial.println(EE_value);
-	if (EE_value != 255) {
-		downlightersOnOffState = (EE_value == 0) ? false : true;
-	}
-
-	// Is clock supposed to be on or off
-	EE_value = EEPROM.read(EE_clockOnOffState);
-	Serial.print("EE_clockOnOffState: "); Serial.println(EE_value);
-	if (EE_value != 255) {
-		clockOnOffState = (EE_value == 0) ? false : true;
-	}
-
-	// Is testMode to be engaged
-	EE_value = EEPROM.read(EE_testMode);
-	Serial.print("EE_testMode: "); Serial.println(EE_value);
-	testMode = (EE_value == 0 || EE_value == 255) ? false : true;
-
-	// Default Global Brightness
-	EE_value = EEPROM.read(EE_defaultGlobalBrightnessLevel);
-	Serial.print("EE_defaultGlobalBrightnessLevel: "); Serial.println(EE_value);
-	defaultGlobalBrightnessLevel = EE_value;
-
-	// Hour Digits Color
-	EE_value = EEPROM.read(EE_defaultHourColor);
-	Serial.print("EE_defaultHourColor: "); Serial.println(EE_value);
-	defaultHourColor = arr_crgbcolors[EE_value].colorcrgb;
-
-	// Min Digits Color
-	EE_value = EEPROM.read(EE_defaultMinColor);
-	Serial.print("EE_defaultMinColor: "); Serial.println(EE_value);
-	defaultMinColor = arr_crgbcolors[EE_value].colorcrgb;
-
-	// DL Color
-	EE_value = EEPROM.read(EE_defaultDLColor);
-	Serial.print("EE_defaultDLColor: "); Serial.println(EE_value);
-	defaultDLColor = arr_crgbcolors[EE_value].colorcrgb;
-
-	// Clock Brightness
-	EE_value = EEPROM.read(EE_currentClockBrightnessLevel);
-	Serial.print("EE_currentClockBrightnessLevel: "); Serial.println(EE_value);
-	currentClockBrightnessLevel=EE_value;
-
-	// DL Brightness
-	EE_value = EEPROM.read(EE_currentDLBrightnessLevel);
-	Serial.print("EE_currentDLBrightnessLevel: "); Serial.println(EE_value);
-	currentDLBrightnessLevel=EE_value;
-}
-
-void outputEEPROMValues() {
-	Serial.println("Reading EEPROM...");
-	WebSerial.println("Reading EEPROM...");
-
-	int EE_value = EEPROM.read(EE_downlighterOnOffState);
-	Serial.print("EE_downlighterOnOffState: ");	Serial.println(EE_value);
-	WebSerial.print("EE_downlighterOnOffState: ");	WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_clockOnOffState);
-	Serial.print("EE_clockOnOffState: "); Serial.println(EE_value);
-	WebSerial.print("EE_clockOnOffState: "); WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_testMode);
-	Serial.print("EE_testMode: "); Serial.println(EE_value);
-	WebSerial.print("EE_testMode: "); WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_defaultGlobalBrightnessLevel);
-	Serial.print("EE_defaultGlobalBrightnessLevel: "); Serial.println(EE_value);
-	WebSerial.print("EE_defaultGlobalBrightnessLevel: "); WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_defaultHourColor);
-	Serial.print("EE_defaultHourColor: "); Serial.println(EE_value);
-	WebSerial.print("EE_defaultHourColor: "); WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_defaultMinColor);
-	Serial.print("EE_defaultMinColor: "); Serial.println(EE_value);
-	WebSerial.print("EE_defaultMinColor: "); WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_defaultDLColor);
-	Serial.print("EE_defaultDLColor: "); Serial.println(EE_value);
-	WebSerial.print("EE_defaultDLColor: "); WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_currentClockBrightnessLevel);
-	Serial.print("EE_currentClockBrightnessLevel: "); Serial.println(EE_value);
-	WebSerial.print("EE_currentClockBrightnessLevel: "); WebSerial.println(EE_value);
-
-	EE_value = EEPROM.read(EE_currentDLBrightnessLevel);
-	Serial.print("EE_currentDLBrightnessLevel: "); Serial.println(EE_value);
-	WebSerial.print("EE_currentDLBrightnessLevel: "); WebSerial.println(EE_value);
-}
 
 void toggleDownlights(int state, int brightness) {
 	// state is 1 = on and 0 = off.  
@@ -870,14 +1065,13 @@ void toggleDownlights(int state, int brightness) {
 				defaultDLColor = clamp_rgb(defaultDLColor, brightness);
 				ShelfDisplays->setInternalLEDColor(defaultDLColor);
 				currentDLBrightnessLevel = brightness;
-				EEPROM.write(EE_currentDLBrightnessLevel, currentDLBrightnessLevel);
-				EEPROM.commit();
+				//EEPROM.write(EE_currentDLBrightnessLevel, currentDLBrightnessLevel);
+				//EEPROM.commit();
+				updateSetting("DLBrightness", String(currentDLBrightnessLevel));
 			}
 			break;
 	}
-	EEPROM.write(EE_downlighterOnOffState,state);
-	EEPROM.commit();
-	outputEEPROMValues();
+	(downlightersOnOffState) ? updateSetting("DLOn", "On") : updateSetting("DLOn", "Off");
 }
 
 void toggleClocklights(int state, int brightness) {
@@ -899,14 +1093,12 @@ void toggleClocklights(int state, int brightness) {
 				ShelfDisplays->setHourSegmentColors(defaultHourColor);
 				ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
 				currentClockBrightnessLevel = brightness;
-				EEPROM.write(EE_currentClockBrightnessLevel,currentClockBrightnessLevel);
-				EEPROM.commit();
+				updateSetting("ClockBrightness", String(currentClockBrightnessLevel));
+
 			}
 			break;
 	}
-	EEPROM.write(EE_clockOnOffState,state);
-	EEPROM.commit();
-	outputEEPROMValues();
+	(clockOnOffState) ? updateSetting("ClockOn", "On") : updateSetting("ClockOn", "Off");
 }
 
 void toggleSchlock(int state, int brightness) {
@@ -926,15 +1118,12 @@ void toggleSchlock(int state, int brightness) {
 			downlightersOnOffState = true;
 			if (brightness >= 1) {
 				ShelfDisplays->setGlobalBrightness(brightness, true);
-				EEPROM.write(EE_defaultGlobalBrightnessLevel,state);
-				EEPROM.commit();
+				updateSetting("GlobalBrightness", String(brightness));
 			}
 			break;
 	}
-	EEPROM.write(EE_clockOnOffState,state);
-	EEPROM.commit();
-	EEPROM.write(EE_downlighterOnOffState,state);
-	EEPROM.commit();
+	(downlightersOnOffState) ? updateSetting("DLOn", "On") : updateSetting("DLOn", "Off");
+	(clockOnOffState) ? updateSetting("ClockOn", "On") : updateSetting("ClockOn", "Off");
 }
 
 void startupAnimation()
@@ -950,8 +1139,15 @@ void startupAnimation()
 
 	TimeManager::TimeInfo currentTime;
 	currentTime = timeM->getCurrentTime();
-	targetHourH = currentTime.hours / 10;
-	targetHourL = currentTime.hours % 10;
+	if (currentTime.hours == 0 && !USE_24_HOUR_FORMAT) {
+		targetHourH = 12 / 10;
+		targetHourL = 12 % 10;
+	} else {
+		targetHourH = currentTime.hours / 10;
+		targetHourL = currentTime.hours % 10;
+	}
+	//targetHourH = currentTime.hours / 10;
+	//targetHourL = currentTime.hours % 10;
 	targetMinH = currentTime.minutes / 10;
 	targetMinL = currentTime.minutes % 10;
 
@@ -981,6 +1177,7 @@ void startupAnimation()
 	}
 }
 
+/*
 void AlarmTriggered()
 {
     states->switchMode(ClockState::ALARM_NOTIFICATION);
@@ -988,12 +1185,14 @@ void AlarmTriggered()
 
 void TimerTick(){
 	// Not sure what this was for.
+	WebSerial.println("TimerTick Called...");
 }
 
 void TimerDone()
 {
     states->switchMode(ClockState::TIMER_NOTIFICATION);
 }
+*/
 
 #if RUN_WITHOUT_WIFI == false
 	void WiFiStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
