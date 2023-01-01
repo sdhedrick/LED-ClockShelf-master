@@ -1097,6 +1097,7 @@ void toggleClocklights(int state, int brightness) {
 void toggleSchlock(int state, int brightness) {
 	// state is 1 = on and 0 = off.  
 	// value is 0-255 for brightness
+	// but for turning on and off both, it only makes sense to use the state.  going to ignore the brightness changes.
 	switch(state) {
 		case 0:
 			ShelfDisplays->setHourSegmentColors(CRGB::Black);
@@ -1107,22 +1108,16 @@ void toggleSchlock(int state, int brightness) {
 			break;
 		case 1:
 			// Set all back to their color.
-			if (brightness >= 1) {
-				clockOnOffState = true;
-				downlightersOnOffState = true;
+			clockOnOffState = true;
+			downlightersOnOffState = true;
 
-				defaultHourColor = clamp_rgb(defaultHourColor, brightness);
-				defaultMinColor = clamp_rgb(defaultMinColor, brightness);
-				ShelfDisplays->setHourSegmentColors(defaultHourColor);
-				ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
-				currentClockBrightnessLevel = brightness;
-				updateSetting("ClockBrightness", String(currentClockBrightnessLevel));
+			defaultHourColor = clamp_rgb(defaultHourColor, brightness);
+			defaultMinColor = clamp_rgb(defaultMinColor, brightness);
+			ShelfDisplays->setHourSegmentColors(defaultHourColor);
+			ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
 
-				defaultDLColor = clamp_rgb(defaultDLColor, brightness);
-				ShelfDisplays->setInternalLEDColor(defaultDLColor);
-				currentDLBrightnessLevel = brightness;
-				updateSetting("DLBrightness", String(currentDLBrightnessLevel));
-			}
+			defaultDLColor = clamp_rgb(defaultDLColor, brightness);
+			ShelfDisplays->setInternalLEDColor(defaultDLColor);
 			break;
 	}
 	(downlightersOnOffState) ? updateSetting("DLOn", "On") : updateSetting("DLOn", "Off");
