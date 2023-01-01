@@ -18,7 +18,7 @@ Instead of trying to figure out Blynk, I just created my own ESP Async Web Serve
 7. Set the Global Brightness Level
 8. Manually restart the controller
 
-Configured things so that all Async Web Settings are saved to EEPROM and will reestablish on power cycle.
+Configured things so that all Async Web Settings are saved to a JSON Setting File using LittleFS and all settings are reestablished on power cycle.
 
 In addition to the Async Web Server, also added WebSerial so that you can see certain output via <clockdevice>/webserial.
 
