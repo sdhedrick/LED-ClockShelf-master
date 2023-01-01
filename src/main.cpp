@@ -14,7 +14,6 @@
 #include <WebSerial.h> // for sending debug to web.
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
-#include "FS.h"
 #include <LittleFS.h> // gonna use for file storage and reading/writing settings instead of eeprom.  Will use JSON for settings.
 #include "ArduinoJson.h" // reading/writing json
 
@@ -1058,15 +1057,11 @@ void toggleDownlights(int state, int brightness) {
 			downlightersOnOffState = false;
 			break;
 		case 1:
-			ShelfDisplays->setInternalLEDColor(defaultDLColor);
-			downlightersOnOffState = true;
 			if (brightness >= 1) {
-				//ShelfDisplays->setGlobalBrightness(brightness, true);
+				downlightersOnOffState = true;
 				defaultDLColor = clamp_rgb(defaultDLColor, brightness);
 				ShelfDisplays->setInternalLEDColor(defaultDLColor);
 				currentDLBrightnessLevel = brightness;
-				//EEPROM.write(EE_currentDLBrightnessLevel, currentDLBrightnessLevel);
-				//EEPROM.commit();
 				updateSetting("DLBrightness", String(currentDLBrightnessLevel));
 			}
 			break;
@@ -1085,16 +1080,14 @@ void toggleClocklights(int state, int brightness) {
 			break;
 		case 1:
 			// Set clock back to their color.
-			clockOnOffState = true;
 			if (brightness >= 1) {
-				//ShelfDisplays->setGlobalBrightness(brightness, true);
+				clockOnOffState = true;
 				defaultHourColor = clamp_rgb(defaultHourColor, brightness);
 				defaultMinColor = clamp_rgb(defaultMinColor, brightness);
 				ShelfDisplays->setHourSegmentColors(defaultHourColor);
 				ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
 				currentClockBrightnessLevel = brightness;
 				updateSetting("ClockBrightness", String(currentClockBrightnessLevel));
-
 			}
 			break;
 	}
@@ -1114,11 +1107,21 @@ void toggleSchlock(int state, int brightness) {
 			break;
 		case 1:
 			// Set all back to their color.
-			clockOnOffState = true;
-			downlightersOnOffState = true;
 			if (brightness >= 1) {
-				ShelfDisplays->setGlobalBrightness(brightness, true);
-				updateSetting("GlobalBrightness", String(brightness));
+				clockOnOffState = true;
+				downlightersOnOffState = true;
+
+				defaultHourColor = clamp_rgb(defaultHourColor, brightness);
+				defaultMinColor = clamp_rgb(defaultMinColor, brightness);
+				ShelfDisplays->setHourSegmentColors(defaultHourColor);
+				ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
+				currentClockBrightnessLevel = brightness;
+				updateSetting("ClockBrightness", String(currentClockBrightnessLevel));
+
+				defaultDLColor = clamp_rgb(defaultDLColor, brightness);
+				ShelfDisplays->setInternalLEDColor(defaultDLColor);
+				currentDLBrightnessLevel = brightness;
+				updateSetting("DLBrightness", String(currentDLBrightnessLevel));
 			}
 			break;
 	}
