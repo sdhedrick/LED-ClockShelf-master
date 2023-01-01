@@ -1034,11 +1034,11 @@ String webProcessor(const String& var){
 
 		// Sliders for Brightness
 		String bsliders = "<h4>Global Brightness Level</h4>\n<span id=\"gSliderText\">" + String(defaultGlobalBrightnessLevel) + "</span>\n";
-  		bsliders += "<p><input type=\"range\" onchange=\"updateSliderG(this)\" id=\"gSlider\" min=\"0\" max=\"255\" value=\"" + String(defaultGlobalBrightnessLevel) + "\" step=\"1\" class=\"bslider\"></p>\n";
+  		bsliders += "<p><input type=\"range\" onchange=\"updateSliderG(this)\" id=\"gSlider\" min=\"0\" max=\"254\" value=\"" + String(defaultGlobalBrightnessLevel) + "\" step=\"1\" class=\"bslider\"></p>\n";
 		bsliders += "<h4>Clock Brightness Level</h4>\n<span id=\"cSliderText\">" + String(currentClockBrightnessLevel) + "</span>\n";
-  		bsliders += "<p><input type=\"range\" onchange=\"updateSliderC(this)\" id=\"cSlider\" min=\"0\" max=\"255\" value=\"" + String(currentClockBrightnessLevel) + "\" step=\"1\" class=\"bslider\"></p>\n";
+  		bsliders += "<p><input type=\"range\" onchange=\"updateSliderC(this)\" id=\"cSlider\" min=\"0\" max=\"254\" value=\"" + String(currentClockBrightnessLevel) + "\" step=\"1\" class=\"bslider\"></p>\n";
 		bsliders += "<h4>Down Lights Brightness Level</h4>\n<span id=\"dlSliderText\">" + String(currentDLBrightnessLevel) + "</span>\n";
-  		bsliders += "<p><input type=\"range\" onchange=\"updateSliderDL(this)\" id=\"dlSlider\" min=\"0\" max=\"255\" value=\"" + String(currentDLBrightnessLevel) + "\" step=\"1\" class=\"bslider\"></p>\n";
+  		bsliders += "<p><input type=\"range\" onchange=\"updateSliderDL(this)\" id=\"dlSlider\" min=\"0\" max=\"254\" value=\"" + String(currentDLBrightnessLevel) + "\" step=\"1\" class=\"bslider\"></p>\n";
 
 		buttons += bsliders;
 
@@ -1051,6 +1051,8 @@ String webProcessor(const String& var){
 void toggleDownlights(int state, int brightness) {
 	// state is 1 = on and 0 = off.  
 	// value is 0-255 for brightness
+	// NOTE:  if brightness is 255 that means someone used alexa to "turn on" without specifying the brightness level.
+	// in that case we want to not set the brightness but turn it on back to original brightness.
 	switch(state) {
 		case 0:
 			ShelfDisplays->setInternalLEDColor(CRGB::Black);
@@ -1061,8 +1063,10 @@ void toggleDownlights(int state, int brightness) {
 				downlightersOnOffState = true;
 				defaultDLColor = clamp_rgb(defaultDLColor, brightness);
 				ShelfDisplays->setInternalLEDColor(defaultDLColor);
-				currentDLBrightnessLevel = brightness;
-				updateSetting("DLBrightness", String(currentDLBrightnessLevel));
+				if (brightness < 255) {
+					currentDLBrightnessLevel = brightness;
+					updateSetting("DLBrightness", String(currentDLBrightnessLevel));
+				}
 			}
 			break;
 	}
@@ -1072,6 +1076,8 @@ void toggleDownlights(int state, int brightness) {
 void toggleClocklights(int state, int brightness) {
 	// state is 1 = on and 0 = off.  
 	// value is 0-255 for brightness
+	// NOTE:  if brightness is 255 that means someone used alexa to "turn on" without specifying the brightness level.
+	// in that case we want to not set the brightness but turn it on back to original brightness.
 	switch(state) {
 		case 0:
 			ShelfDisplays->setHourSegmentColors(CRGB::Black);
@@ -1086,8 +1092,10 @@ void toggleClocklights(int state, int brightness) {
 				defaultMinColor = clamp_rgb(defaultMinColor, brightness);
 				ShelfDisplays->setHourSegmentColors(defaultHourColor);
 				ShelfDisplays->setMinuteSegmentColors(defaultMinColor);
-				currentClockBrightnessLevel = brightness;
-				updateSetting("ClockBrightness", String(currentClockBrightnessLevel));
+				if (brightness < 255) {
+					currentClockBrightnessLevel = brightness;
+					updateSetting("ClockBrightness", String(currentClockBrightnessLevel));
+				}
 			}
 			break;
 	}
@@ -1096,8 +1104,10 @@ void toggleClocklights(int state, int brightness) {
 
 void toggleSchlock(int state, int brightness) {
 	// state is 1 = on and 0 = off.  
-	// value is 0-255 for brightness
+	// value is 0-255 for brightness.
 	// but for turning on and off both, it only makes sense to use the state.  going to ignore the brightness changes.
+	// NOTE:  if brightness is 255 that means someone used alexa to "turn on" without specifying the brightness level.
+	// in that case we want to not set the brightness but turn it on back to original brightness.
 	switch(state) {
 		case 0:
 			ShelfDisplays->setHourSegmentColors(CRGB::Black);
@@ -1118,6 +1128,12 @@ void toggleSchlock(int state, int brightness) {
 
 			defaultDLColor = clamp_rgb(defaultDLColor, brightness);
 			ShelfDisplays->setInternalLEDColor(defaultDLColor);
+			if (brightness < 255) {
+				currentDLBrightnessLevel = brightness;
+				updateSetting("DLBrightness", String(currentDLBrightnessLevel));
+				currentClockBrightnessLevel = brightness;
+				updateSetting("ClockBrightness", String(currentClockBrightnessLevel));
+			}
 			break;
 	}
 	(downlightersOnOffState) ? updateSetting("DLOn", "On") : updateSetting("DLOn", "Off");
